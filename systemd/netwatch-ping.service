@@ -1,0 +1,7 @@
+[Unit]
+Description=netwatch ping probe (10 pings to 1.1.1.1)
+
+[Service]
+Type=oneshot
+Nice=10
+ExecStart=/usr/bin/python3 %h/dev/netwatch/netwatch.py ping

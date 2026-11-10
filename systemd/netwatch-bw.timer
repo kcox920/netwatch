@@ -1,0 +1,10 @@
+[Unit]
+Description=netwatch: check every minute whether a speed test is due (interval set from the tray menu)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=60s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

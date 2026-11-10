@@ -1,0 +1,7 @@
+[Unit]
+Description=netwatch scheduled bandwidth test (runs only when bw_interval_min has elapsed)
+
+[Service]
+Type=oneshot
+Nice=10
+ExecStart=/usr/bin/python3 %h/dev/netwatch/netwatch.py bw --if-due
