@@ -50,6 +50,8 @@ DEFAULTS = dict(
     loss_yellow_pct=0.0, loss_red_pct=20.0,
     # ignore data that is too old
     ping_stale_s=240, bw_stale_s=5400,
+    # log the AT&T gateway's radio signal once a minute (needs ~/.config/netwatch/gateway.json)
+    signal_log=True,
 )
 ORDER = {"green": 0, "yellow": 1, "red": 2}
 
@@ -272,6 +274,77 @@ def run_quick(c, notify=False, why="quick"):
     return state
 
 
+def log_signal(c):
+    """Optional: one radio-signal reading from the AT&T gateway. Never raises, so
+    a gateway hiccup cannot break the ping probe."""
+    if not c.get("signal_log", True):
+        return
+    try:
+        import attgw
+        creds = attgw.load_credentials()
+        if not creds:
+            return
+        gw = attgw.Gateway(creds["host"], creds["login"], creds["code"], timeout=8)
+        try:
+            gw.login()
+            sig = attgw.read_signal(gw)
+        finally:
+            gw.logout()
+        sig["ts"] = now()
+        record(sig, "signal")
+    except Exception as e:  # noqa: BLE001 - logging must never fail the probe
+        record(dict(type="signal_error", ts=now(), error=str(e)[:160]), "signal_error")
+
+
+def cmd_signal(args):
+    """One reading, or --watch for a live feed (handy while repositioning the gateway)."""
+    import attgw
+    creds = attgw.load_credentials()
+    if not creds:
+        sys.exit(f"no gateway credentials: create {attgw.CRED_FILE} (see README)")
+    gw = attgw.Gateway(creds["host"], creds["login"], creds["code"])
+    best, prev = None, None
+    try:
+        while True:
+            try:
+                if not gw.logged_in:
+                    gw.login()
+                sig = attgw.read_signal(gw)
+                sig["ts"] = now()
+            except attgw.GatewayError as e:
+                print(f"{dt.datetime.now():%H:%M:%S}  gateway: {e}", flush=True)
+                if not args.watch:
+                    return 1
+                time.sleep(args.interval)
+                continue
+            if args.log:
+                record(sig, "signal")
+            sc = attgw.score(sig)
+            if not args.watch:
+                l, n, lab = sig["lte"], sig["nr"], attgw.labels(sig)
+                print(f"{sig['tech']} on {sig['network']}  (status {sig['status']})")
+                print(f"LTE band {l['band']} ({l['bw_mhz']:g} MHz, {l['ca_cells']} extra carriers)  PCI {l['pci']:g}  "
+                      f"eNB {l['enb']} sector {l['sector']}")
+                print(f"  RSRP {l['rsrp']:g} dBm [{lab['rsrp']}]   RSRQ {l['rsrq']:g} dB [{lab['rsrq']}]   "
+                      f"SINR {l['sinr']:g} dB [{lab['sinr']}]")
+                if n["sinr"] is not None:
+                    print(f"NR band n{n['band']} ({n['bw_mhz']:g} MHz)  PCI {n['pci']:g}  RSRP {n['rsrp']:g}  "
+                          f"RSRQ {n['rsrq']:g}  SINR {n['sinr']:g} dB [{lab['nr_sinr']}]")
+                for nb in sig["neighbours"]:
+                    print(f"  neighbour PCI {nb['pci']}: rsrp {nb['rsrp']} rsrq {nb['rsrq']}")
+                print(f"placement score: {sc}/100")
+                return 0
+            best = sc if best is None or (sc or 0) > best else best
+            arrow = "  " if prev is None or sc == prev else ("^ " if sc > prev else "v ")
+            print(f"{dt.datetime.now():%H:%M:%S} {arrow}score {sc:>3} (best {best:>3}) | {attgw.summary_line(sig)}", flush=True)
+            prev = sc
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        gw.logout()
+
+
 def cmd_ping(args):
     os.nice(10)
     c = cfg()
@@ -282,6 +355,7 @@ def cmd_ping(args):
         before, _ = classify(c, load_latest())
         p = do_ping(c["ping_host"], c["ping_count"], c["ping_interval"], c["ping_wait"])
         record(p, "ping")
+        log_signal(c)
     finally:
         lk.release()
     # Coming back from an outage: the last speed sample is probably a red one
@@ -341,6 +415,10 @@ def cmd_status(args):
         print(f"ping  {p['time']}  {ms}, {p['loss']:.0f}% loss")
     if b:
         print(f"speed {b['time']}  {b['mbit']:.1f} Mbit/s ({b['type']}, {b['bytes'] / 1e6:.1f} MB in {b['seconds']} s)")
+    sg = latest.get("signal")
+    if sg:
+        print(f"radio {sg['time']}  LTE {sg['lte']['rsrp']:g} dBm / rsrq {sg['lte']['rsrq']:g} / sinr {sg['lte']['sinr']:g}"
+              f"  NR sinr {sg['nr']['sinr'] if sg['nr']['sinr'] is not None else 'n/a'}  (PCI {sg['lte']['pci']:g})")
     return 0
 
 
@@ -352,7 +430,7 @@ def _pct(vals, q):
 def cmd_report(args):
     c = cfg()
     since = now() - args.hours * 3600
-    pings, bws = [], []
+    pings, bws, sigs = [], [], []
     try:
         for line in open(DATA / "samples.jsonl"):
             try:
@@ -365,10 +443,13 @@ def cmd_report(args):
                 pings.append(s)
             elif s["type"] in ("bw", "quick"):
                 bws.append(s)
+            elif s["type"] == "signal":
+                sigs.append(s)
     except FileNotFoundError:
         print("no samples yet")
         return 0
     print(f"netwatch report: last {args.hours:g} h (since {iso(since)})")
+    runs = []
     if pings:
         lat = [p["avg"] for p in pings if "avg" in p]
         dead = [p for p in pings if p["recv"] == 0]
@@ -410,7 +491,52 @@ def cmd_report(args):
         print("  slowest:  " + "; ".join(f"{dt.datetime.fromtimestamp(b['ts']):%a %H:%M} {b['mbit']:.1f}" for b in worst))
     else:
         print("\nno speed samples in this window")
+    if sigs:
+        _report_signal(sigs, runs)
     return 0
+
+
+def _report_signal(sigs, runs):
+    """Radio-signal section: how good the link is, which cells served it, and what
+    the signal looked like just before each outage."""
+    def col(path):
+        out = []
+        for s in sigs:
+            v = s
+            for k in path:
+                v = (v or {}).get(k) if isinstance(v, dict) else None
+            if isinstance(v, (int, float)):
+                out.append(v)
+        return out
+
+    print(f"\nGateway signal: {len(sigs)} readings")
+    for label, path, unit in (("LTE RSRP", ("lte", "rsrp"), "dBm"), ("LTE RSRQ", ("lte", "rsrq"), "dB"),
+                              ("LTE SINR", ("lte", "sinr"), "dB"), ("NR  SINR", ("nr", "sinr"), "dB")):
+        v = col(path)
+        if v:
+            print(f"  {label}: median {_pct(v, .5):g}, worst {min(v):g}, best {max(v):g} {unit}")
+    cells = {}
+    for s in sigs:
+        k = (s.get("lte") or {}).get("pci"), (s.get("lte") or {}).get("cellid")
+        cells[k] = cells.get(k, 0) + 1
+    if len(cells) > 1:
+        print("  serving cells seen: " + ", ".join(f"PCI {k[0]:g}/ECI {k[1]} x{n}" for k, n in
+                                                  sorted(cells.items(), key=lambda kv: -kv[1])[:4]))
+    elif cells:
+        (k, n), = cells.items()
+        print(f"  one serving cell the whole time: PCI {k[0]:g}, ECI {k[1]}")
+    errs = [s for s in sigs if s.get("status") not in (None, "Up")]
+    if errs:
+        print(f"  readings where the modem was not 'Up': {len(errs)}")
+    if runs:
+        print("  signal in the last reading before each outage:")
+        for r in runs[:8]:
+            before = [s for s in sigs if 0 <= r[0]["ts"] - s["ts"] <= 300]
+            if before:
+                s = before[-1]
+                print(f"    {dt.datetime.fromtimestamp(r[0]['ts']):%a %H:%M}: {s['lte']['rsrp']:g} dBm / "
+                      f"rsrq {s['lte']['rsrq']:g} / sinr {s['lte']['sinr']:g} / NR sinr "
+                      f"{s['nr']['sinr'] if s['nr']['sinr'] is not None else 'n/a'}")
 
 
 def main():
@@ -425,6 +551,11 @@ def main():
     p = sub.add_parser("quick")
     p.add_argument("--notify", action="store_true")
     p.set_defaults(fn=cmd_quick)
+    p = sub.add_parser("signal", help="read the AT&T gateway's radio signal (needs gateway.json)")
+    p.add_argument("--watch", action="store_true", help="live feed; Ctrl-C to stop")
+    p.add_argument("--interval", type=float, default=4.0, help="seconds between readings with --watch")
+    p.add_argument("--log", action="store_true", help="also append each reading to the history")
+    p.set_defaults(fn=cmd_signal)
     p = sub.add_parser("status")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_status)

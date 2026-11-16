@@ -71,6 +71,7 @@ netwatch status              # current colour and latest numbers
 netwatch quick               # 2-second check
 netwatch report --hours 24   # outages, latency percentiles, speed distribution
 netwatch bw                  # run a full speed test now
+netwatch signal --watch      # live radio signal from the AT&T gateway (see below)
 ```
 
 ## Configuration
@@ -85,6 +86,36 @@ Optional overrides go in `~/.config/netwatch/config.json`; any key from
 `bw_interval_min` is the one the tray menu edits (`0` = paused). Colour
 thresholds and the ping rules are also there. Speeds between `red_mbit` and
 `green_mbit` are yellow.
+
+## Gateway signal logging (AT&T Internet Air, optional)
+
+With the gateway's Device Access Code, netwatch can also log the cellular radio
+signal (LTE and 5G RSRP / RSRQ / SINR, serving cell, neighbour cells) once a
+minute, so dropouts and slow periods can be lined up with radio conditions.
+It only reads status from the gateway's own web API (the one its web page uses;
+unofficial, tested on the Nov 2026 firmware) and never changes anything.
+
+Create `~/.config/netwatch/gateway.json` **outside this repo** and lock it down:
+
+```sh
+umask 077
+cat > ~/.config/netwatch/gateway.json <<'EOF'
+{ "host": "192.168.1.254", "login": "admin", "code": "YOUR-DEVICE-ACCESS-CODE" }
+EOF
+```
+
+Then:
+
+```sh
+netwatch signal            # one reading, with a quality label for each number
+netwatch signal --watch    # live feed + a 0-100 placement score, for finding the best spot for the gateway
+netwatch report            # now also summarises signal and shows it just before each outage
+```
+
+The score is only for comparing positions of the same gateway (it averages the
+normalised RSRP, RSRQ and SINR readings); it is not an absolute grade. Logging is
+skipped silently if the file is missing, and a gateway error never interrupts the
+ping probe. Set `"signal_log": false` in `config.json` to turn it off.
 
 ## Notes and limitations
 
@@ -101,7 +132,8 @@ GPL-3.0-or-later. See [LICENSE](LICENSE).
 
 ## Files
 
-- `netwatch.py` - probes, logging, `status`/`report`, colour rules
+- `netwatch.py` - probes, logging, `status`/`report`/`signal`, colour rules
+- `attgw.py` - read-only client for the AT&T Internet Air gateway (signal logging)
 - `netwatch_indicator.py` - the tray light and menu
 - `systemd/` - user timers (ping every minute; speed test checked every minute and run when due)
 - `icons/` - the five light icons
