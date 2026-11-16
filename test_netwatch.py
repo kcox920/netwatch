@@ -106,5 +106,27 @@ class SpeedTestSchedule(unittest.TestCase):
         self.assertEqual(nw.classify(c, latest, T + 5)[0], "red")
 
 
+class GatewayHelpers(unittest.TestCase):
+    def test_sha512_crypt_reference_vector(self):
+        # published test vector from the SHA-crypt specification
+        import attgw
+        self.assertEqual(
+            attgw.sha512_crypt("Hello world!", "saltstring"),
+            "$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJuesI68u4OTLiBFdcbYEdFCoEOfaS35inz1")
+
+    def test_signal_labels_and_score(self):
+        import attgw
+        sig = dict(lte=dict(rsrp=-102, rsrq=-16, sinr=10), nr=dict(sinr=-2))
+        lab = attgw.labels(sig)
+        self.assertEqual((lab["rsrp"], lab["rsrq"], lab["sinr"], lab["nr_sinr"]), ("poor", "poor", "fair", "bad"))
+        good = dict(lte=dict(rsrp=-80, rsrq=-8, sinr=22), nr=dict(sinr=22))
+        self.assertGreater(attgw.score(good), attgw.score(sig))
+        self.assertTrue(0 <= attgw.score(sig) <= 100)
+
+    def test_score_without_5g(self):
+        import attgw
+        self.assertIsNotNone(attgw.score(dict(lte=dict(rsrp=-95, rsrq=-11, sinr=15), nr=dict(sinr=None))))
+
+
 if __name__ == "__main__":
     unittest.main()

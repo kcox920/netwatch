@@ -72,9 +72,11 @@ class Light:
         menu = Gtk.Menu()
         self.items = {}
         self._updating = False
-        for key in ("state", "speed", "ping", "next"):
+        for key in ("state", "speed", "ping", "radio", "next"):
             it = Gtk.MenuItem(label="...")
             it.set_sensitive(False)
+            if key == "radio":
+                it.set_no_show_all(True)  # only shown once gateway signal logging is set up
             menu.append(it)
             self.items[key] = it
         menu.append(Gtk.SeparatorMenuItem())
@@ -225,6 +227,15 @@ class Light:
             self.items["ping"].set_label(f"Ping {self.c['ping_host']}: {ms}, {p['loss']:.0f}% loss  ({ago(p['ts'])})")
         else:
             self.items["ping"].set_label("Ping: no data yet")
+        sg = latest.get("signal")
+        if sg:
+            n = sg["nr"]["sinr"]
+            self.items["radio"].set_label(
+                f"Radio: {sg['lte']['rsrp']:g} dBm, SINR {sg['lte']['sinr']:g}"
+                f"{'' if n is None else f' (5G {n:g})'}  ({ago(sg['ts'])})")
+            self.items["radio"].show()
+        else:
+            self.items["radio"].hide()
         return True
 
     def blink(self):
